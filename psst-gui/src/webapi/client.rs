@@ -41,6 +41,7 @@ use crate::{
 use super::{cache::WebApiCache, local::LocalTrackManager};
 use sanitize_html::rules::predefined::DEFAULT;
 use sanitize_html::sanitize_str;
+use ureq::tls::{RootCerts, TlsConfig};
 
 pub struct WebApi {
     session: SessionService,
@@ -58,7 +59,13 @@ impl WebApi {
         cache_base: Option<PathBuf>,
         paginated_limit: usize,
     ) -> Self {
-        let mut agent = Agent::config_builder().timeout_global(Some(Duration::from_secs(5)));
+        let mut agent = Agent::config_builder()
+            .tls_config(
+                TlsConfig::builder()
+                    .root_certs(RootCerts::PlatformVerifier)
+                    .build()
+            )
+            .timeout_global(Some(Duration::from_secs(5)));
         if let Some(proxy_url) = proxy_url {
             let proxy = ureq::Proxy::new(proxy_url).ok();
             agent = agent.proxy(proxy);
