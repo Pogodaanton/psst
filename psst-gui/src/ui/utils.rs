@@ -2,7 +2,7 @@ use std::{f64::consts::PI, time::Duration};
 
 use druid::{
     kurbo::Circle,
-    widget::{prelude::*, CrossAxisAlignment, Flex, Label, SizedBox},
+    widget::{prelude::*, CrossAxisAlignment, Flex, Label, LineBreaking, SizedBox},
     Data, Point, Vec2, Widget, WidgetExt, WidgetPod,
 };
 use time_humanize::HumanTime;
@@ -109,16 +109,29 @@ pub fn error_widget() -> impl Widget<Error> {
                 .with_text_color(theme::PLACEHOLDER_COLOR),
         )
         .with_child(
-            Label::dynamic(|err: &Error, _| err.to_string())
+            Label::dynamic(|err: &Error, _| format_error_message(err))
                 .with_text_size(theme::TEXT_SIZE_SMALL)
-                .with_text_color(theme::PLACEHOLDER_COLOR),
+                .with_text_color(theme::PLACEHOLDER_COLOR)
+                .with_line_break_mode(LineBreaking::WordWrap),
         );
     Flex::row()
         .with_child(icon)
         .with_default_spacer()
-        .with_child(error)
+        .with_flex_child(error, 1.0)
         .padding((0.0, theme::grid(6.0)))
         .center()
+}
+
+/// Format an error message for display in the UI.
+/// For HTTP errors, shows the status code and the server's error message.
+fn format_error_message(err: &Error) -> String {
+    match err {
+        Error::WebApiError(msg) => msg.to_string(),
+        Error::HttpError(details) => {
+            // Show user-friendly message with status code
+            format!("HTTP {} - {}", details.status_code, details.message)
+        }
+    }
 }
 
 pub fn as_minutes_and_seconds(dur: Duration) -> String {
