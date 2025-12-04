@@ -86,7 +86,7 @@ pub fn list_widget() -> impl Widget<AppState> {
                 &d.track_id
                     .0
                     .to_uri()
-                    .ok_or_else(|| Error::WebApiError("Item doesn't have URI".to_string()))?,
+                    .ok_or_else(|| Error::web_api("Item doesn't have URI"))?,
             )
         },
         |_, data, d| {

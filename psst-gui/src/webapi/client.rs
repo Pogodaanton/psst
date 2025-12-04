@@ -59,7 +59,10 @@ impl WebApi {
         cache_base: Option<PathBuf>,
         paginated_limit: usize,
     ) -> Self {
-        let mut agent = Agent::config_builder().timeout_global(Some(Duration::from_secs(5)));
+        let mut agent = Agent::config_builder()
+            .timeout_global(Some(Duration::from_secs(5)))
+            // Don't treat HTTP 4xx/5xx as errors so we can read the response body
+            .http_status_as_error(false);
         if let Some(proxy_url) = proxy_url {
             let proxy = ureq::Proxy::new(proxy_url).ok();
             agent = agent.proxy(proxy);
@@ -77,47 +80,120 @@ impl WebApi {
     fn access_token(&self) -> Result<String, Error> {
         self.login5
             .get_access_token(&self.session)
-            .map_err(|err| Error::WebApiError(err.to_string()))
+            .map_err(|err| Error::web_api(err))
             .map(|t| t.access_token)
+    }
+
+    /// Convert a ureq error to our Error type with additional context
+    fn convert_ureq_error(err: ureq::Error, url: &str, method: &str) -> Error {
+        match err {
+            ureq::Error::StatusCode(code) => {
+                // This shouldn't happen with http_status_as_error(false),
+                // but handle it just in case
+                Error::http(code, format!("HTTP {}", code), url, method, None::<&str>)
+            }
+            ureq::Error::Io(io_err) => Error::web_api(format!(
+                "Network error for {} {}: {}",
+                method, url, io_err
+            )),
+            ureq::Error::Timeout(timeout) => Error::web_api(format!(
+                "Request timeout for {} {}: {:?}",
+                method, url, timeout
+            )),
+            ureq::Error::HostNotFound => Error::web_api(format!(
+                "Host not found for {} {}",
+                method, url
+            )),
+            ureq::Error::ConnectionFailed => Error::web_api(format!(
+                "Connection failed for {} {}",
+                method, url
+            )),
+            other => Error::web_api(format!(
+                "Request failed for {} {}: {}",
+                method, url, other
+            )),
+        }
+    }
+
+    /// Maximum size of error response body to read (to prevent memory issues with large responses)
+    const MAX_ERROR_BODY_SIZE: usize = 64 * 1024; // 64 KB
+
+    /// Check HTTP response status and convert to error if needed
+    fn check_response(mut response: Response<Body>, url: &str, method: &str) -> Result<Response<Body>, Error> {
+        let status = response.status();
+        if status.is_success() {
+            Ok(response)
+        } else {
+            // Read the response body to get the error message, with size limit
+            let body = {
+                let mut buf = String::new();
+                let reader = response.body_mut().as_reader();
+                // Use take() to limit the amount of data read
+                match reader.take(Self::MAX_ERROR_BODY_SIZE as u64).read_to_string(&mut buf) {
+                    Ok(_) => Some(buf),
+                    Err(_) => None,
+                }
+            };
+            let status_text = status.canonical_reason().unwrap_or("Unknown Error");
+            
+            // Log detailed error information for debugging
+            log::error!(
+                "HTTP {} {} failed with status {} {}: {:?}",
+                method,
+                url,
+                status.as_u16(),
+                status_text,
+                body.as_deref().unwrap_or("<no body>")
+            );
+            
+            Err(Error::http(
+                status.as_u16(),
+                status_text,
+                url,
+                method,
+                body,
+            ))
+        }
     }
 
     fn request(&self, request: &RequestBuilder) -> Result<Response<Body>, Error> {
         let token = self.access_token()?;
         let request = request.clone().query("market", "from_token");
+        let url = request.build();
+        let method_str = request.get_method_str();
 
-        match request.get_method() {
+        let result = match request.get_method() {
             Method::Get => {
                 let mut req = self
                     .agent
-                    .get(request.build())
+                    .get(&url)
                     .header("Authorization", &format!("Bearer {token}"));
                 for header in request.get_headers() {
                     req = req.header(header.0, header.1);
                 }
-
                 req.call()
-                    .map_err(|err| Error::WebApiError(err.to_string()))
             }
             Method::Post => self
                 .agent
-                .post(request.build())
+                .post(&url)
                 .header("Authorization", &format!("Bearer {token}"))
-                .send_json(request.get_body())
-                .map_err(|err| Error::WebApiError(err.to_string())),
+                .send_json(request.get_body()),
             Method::Put => self
                 .agent
-                .put(request.build())
+                .put(&url)
                 .header("Authorization", &format!("Bearer {token}"))
-                .send_json(request.get_body())
-                .map_err(|err| Error::WebApiError(err.to_string())),
+                .send_json(request.get_body()),
             Method::Delete => self
                 .agent
-                .delete(request.build())
+                .delete(&url)
                 .header("Authorization", &format!("Bearer {token}"))
                 .force_send_body()
-                .send_json(request.get_body())
-                .map_err(|err| Error::WebApiError(err.to_string())),
-        }
+                .send_json(request.get_body()),
+        };
+
+        result
+            .map_err(|err| Self::convert_ureq_error(err, &url, method_str))
+            .and_then(|resp| Self::check_response(resp, &url, method_str))
     }
 
     fn with_retry(f: impl Fn() -> Result<Response<Body>, Error>) -> Result<Response<Body>, Error> {
@@ -152,7 +228,7 @@ impl WebApi {
         response
             .body_mut()
             .read_json()
-            .map_err(|err| Error::WebApiError(err.to_string()))
+            .map_err(|err| Error::web_api(err))
     }
 
     /// Send a request using `self.load()`, but only if it isn't already present
@@ -1365,7 +1441,7 @@ impl WebApi {
             SpotifyUrl::Track(id) => {
                 let track = self.get_track(id)?;
                 let album = track.album.clone().ok_or_else(|| {
-                    Error::WebApiError("Track was found but has no album".to_string())
+                    Error::web_api("Track was found but has no album")
                 })?;
                 Nav::AlbumDetail(album, Some(track.id))
             }
@@ -1504,25 +1580,27 @@ impl WebApi {
 
 impl From<io::Error> for Error {
     fn from(err: io::Error) -> Self {
-        Error::WebApiError(err.to_string())
+        Error::web_api(err)
     }
 }
 
 impl From<ureq::Error> for Error {
     fn from(err: ureq::Error) -> Self {
-        Error::WebApiError(err.to_string())
+        // Note: This fallback conversion loses context about URL and method.
+        // Prefer using WebApi::convert_ureq_error when context is available.
+        Error::web_api(err)
     }
 }
 
 impl From<serde_json::Error> for Error {
     fn from(err: serde_json::Error) -> Self {
-        Error::WebApiError(err.to_string())
+        Error::web_api(err)
     }
 }
 
 impl From<image::ImageError> for Error {
     fn from(err: image::ImageError) -> Self {
-        Error::WebApiError(err.to_string())
+        Error::web_api(err)
     }
 }
 
@@ -1586,6 +1664,14 @@ impl RequestBuilder {
     }
     fn get_method(&self) -> &Method {
         &self.method
+    }
+    fn get_method_str(&self) -> &'static str {
+        match self.method {
+            Method::Get => "GET",
+            Method::Post => "POST",
+            Method::Put => "PUT",
+            Method::Delete => "DELETE",
+        }
     }
     #[allow(dead_code)]
     fn set_method(mut self, method: Method) -> Self {
