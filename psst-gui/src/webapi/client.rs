@@ -115,14 +115,25 @@ impl WebApi {
         }
     }
 
+    /// Maximum size of error response body to read (to prevent memory issues with large responses)
+    const MAX_ERROR_BODY_SIZE: usize = 64 * 1024; // 64 KB
+
     /// Check HTTP response status and convert to error if needed
     fn check_response(mut response: Response<Body>, url: &str, method: &str) -> Result<Response<Body>, Error> {
         let status = response.status();
         if status.is_success() {
             Ok(response)
         } else {
-            // Read the response body to get the error message
-            let body = response.body_mut().read_to_string().ok();
+            // Read the response body to get the error message, with size limit
+            let body = {
+                let mut buf = String::new();
+                let reader = response.body_mut().as_reader();
+                // Use take() to limit the amount of data read
+                match reader.take(Self::MAX_ERROR_BODY_SIZE as u64).read_to_string(&mut buf) {
+                    Ok(_) => Some(buf),
+                    Err(_) => None,
+                }
+            };
             let status_text = status.canonical_reason().unwrap_or("Unknown Error");
             
             // Log detailed error information for debugging

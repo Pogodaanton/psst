@@ -2,6 +2,12 @@ use std::{error, fmt, sync::Arc};
 
 use druid::Data;
 
+/// Maximum length of raw body text to use directly as an error message
+const MAX_RAW_BODY_MESSAGE_LEN: usize = 200;
+
+/// Maximum length of body text to show in detailed error output before truncating
+const MAX_BODY_DETAILS_LEN: usize = 500;
+
 /// Detailed HTTP error information for better error reporting.
 #[derive(Clone, Debug, Data)]
 pub struct HttpErrorDetails {
@@ -67,7 +73,7 @@ impl HttpErrorDetails {
                 }
             }
             // If body is short enough and not JSON, use it directly
-            if body_str.len() < 200 && !body_str.starts_with('{') {
+            if body_str.len() < MAX_RAW_BODY_MESSAGE_LEN && !body_str.starts_with('{') {
                 return body_str.clone();
             }
         }
@@ -89,8 +95,8 @@ impl HttpErrorDetails {
         );
         if let Some(body) = &self.body {
             // Truncate very long bodies
-            let truncated = if body.len() > 500 {
-                format!("{}... (truncated)", &body[..500])
+            let truncated = if body.len() > MAX_BODY_DETAILS_LEN {
+                format!("{}... (truncated)", &body[..MAX_BODY_DETAILS_LEN])
             } else {
                 body.to_string()
             };
