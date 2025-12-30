@@ -33,8 +33,9 @@ impl Cdn {
     }
 
     pub fn resolve_audio_file_url(&self, id: FileId) -> Result<CdnUrl, Error> {
+        // TODO: Base URL should be resolved through AP_RESOLVE_ENDPOINT. This might be useful for the GUI, too.
         let locations_uri = format!(
-            "https://api.spotify.com/v1/storage-resolve/files/audio/interactive/{}",
+            "https://spclient.wg.spotify.com/storage-resolve/files/audio/interactive/{}",
             id.to_base16()
         );
         let access_token = self.login5.get_access_token(&self.session)?;
