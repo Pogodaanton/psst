@@ -54,7 +54,6 @@ pub fn account_setup_widget() -> impl Widget<AppState> {
     Flex::column()
         .must_fill_main_axis(true)
         .cross_axis_alignment(CrossAxisAlignment::Start)
-        .with_spacer(theme::grid(2.0))
         .with_child(
             Label::new("Please insert your Spotify Premium credentials.")
                 .with_font(theme::UI_FONT_MEDIUM)
@@ -68,7 +67,7 @@ pub fn account_setup_widget() -> impl Widget<AppState> {
             .with_text_color(theme::PLACEHOLDER_COLOR)
             .with_line_break_mode(LineBreaking::WordWrap),
         )
-        .with_spacer(theme::grid(6.0))
+        .with_spacer(theme::grid(2.0))
         .with_child(account_tab_widget(AccountTab::FirstSetup).expand_width())
         .padding(theme::grid(4.0))
 }
