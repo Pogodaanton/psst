@@ -114,7 +114,7 @@ fn async_results_widget() -> impl Widget<AppState> {
             } else {
                 NUMBER_OF_RESULTS_PER_TOPIC
             };
-            WebApi::global().search(&q, &topics, limit)
+            (&*WebApi::global()).search(&q, &topics, limit)
         },
         |_, data, (q, t)| data.search.results.defer((q, t)),
         |_, data, r| data.search.results.update(r),
@@ -129,7 +129,7 @@ fn async_results_widget() -> impl Widget<AppState> {
     })
     .on_command_async(
         OPEN_LINK,
-        |l| WebApi::global().load_spotify_link(&l),
+        |l| (&*WebApi::global()).load_spotify_link(&l),
         |_, data, l| data.search.results.defer((l.id(), None)),
         |ctx, data, (l, r)| match r {
             Ok(nav) => {

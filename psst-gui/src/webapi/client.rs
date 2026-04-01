@@ -1276,7 +1276,7 @@ impl WebApi {
         Ok(result)
     }
 
-    // https://developer.spotify.com/documentation/web-api/reference/get-playlists-tracks
+    // https://developer.spotify.com/documentation/web-api/reference/get-playlists-items
     pub fn get_playlist_tracks(&self, id: &str) -> Result<Vector<Arc<Track>>, Error> {
         #[derive(Clone, Deserialize)]
         struct PlaylistItem {
@@ -1293,7 +1293,8 @@ impl WebApi {
             Json(serde_json::Value),
         }
 
-        let request = &RequestBuilder::new(format!("v1/playlists/{id}/tracks"), Method::Get, None)
+        // Use the renamed `items` endpoint
+        let request = &RequestBuilder::new(format!("v1/playlists/{id}/items"), Method::Get, None)
             .query("marker", "from_token")
             .query("additional_types", "track");
 
@@ -1316,16 +1317,17 @@ impl WebApi {
     }
 
     pub fn change_playlist_details(&self, id: &str, name: &str) -> Result<(), Error> {
-        let request = &RequestBuilder::new(format!("v1/playlists/{id}/tracks"), Method::Get, None)
-            .set_body(Some(json!({ "name": name })));
+        // Use the correct endpoint and method for changing playlist details
+        let request = &RequestBuilder::new(format!("v1/playlists/{id}"), Method::Put, Some(json!({ "name": name })));
         self.request(request)?;
         Ok(())
     }
 
-    // https://developer.spotify.com/documentation/web-api/reference/add-tracks-to-playlist
+    // https://developer.spotify.com/documentation/web-api/reference/add-items-to-playlist
     pub fn add_track_to_playlist(&self, playlist_id: &str, track_uri: &str) -> Result<(), Error> {
+        // POST /v1/playlists/{id}/items?uris=spotify:track:... is still supported shape
         let request = &RequestBuilder::new(
-            format!("v1/playlists/{playlist_id}/tracks"),
+            format!("v1/playlists/{playlist_id}/items"),
             Method::Post,
             None,
         )
@@ -1333,88 +1335,20 @@ impl WebApi {
         self.request(request).map(|_| ())
     }
 
-    // https://developer.spotify.com/documentation/web-api/reference/remove-tracks-playlist
+    // https://developer.spotify.com/documentation/web-api/reference/remove-items-playlist
     pub fn remove_track_from_playlist(
         &self,
         playlist_id: &str,
         track_pos: usize,
     ) -> Result<(), Error> {
+        // use items endpoint; keep using positions body
         let request = &RequestBuilder::new(
-            format!("v1/playlists/{playlist_id}/tracks"),
+            format!("v1/playlists/{playlist_id}/items"),
             Method::Delete,
             None,
         )
         .set_body(Some(json!({ "positions": [track_pos] })));
         self.request(request).map(|_| ())
-    }
-}
-
-/// Search endpoints.
-impl WebApi {
-    // https://developer.spotify.com/documentation/web-api/reference/search/
-    pub fn search(
-        &self,
-        query: &str,
-        topics: &[SearchTopic],
-        limit: usize,
-    ) -> Result<SearchResults, Error> {
-        #[derive(Deserialize)]
-        struct ApiSearchResults {
-            artists: Option<Page<Artist>>,
-            albums: Option<Page<Arc<Album>>>,
-            tracks: Option<Page<Arc<Track>>>,
-            playlists: Option<Page<Playlist>>,
-            shows: Option<Page<Arc<Show>>>,
-        }
-
-        let encoded_query = urlencoding::encode(query);
-        let type_query_param = topics.iter().map(SearchTopic::as_str).join(",");
-        // Clamp limit: default 5 when 0, maximum 10
-        let mut limit = if limit == 0 { 5 } else { limit };
-        if limit > 10 {
-            limit = 10;
-        }
-        let request = &RequestBuilder::new("v1/search", Method::Get, None)
-            .query("q", encoded_query)
-            .query("type", &type_query_param)
-            .query("limit", limit.to_string())
-            .query("marker", "from_token");
-
-        let result: ApiSearchResults = self.load(request)?;
-
-        let artists = result.artists.map_or_else(Vector::new, |page| page.items);
-        let albums = result.albums.map_or_else(Vector::new, |page| page.items);
-        let tracks = result.tracks.map_or_else(Vector::new, |page| page.items);
-        let playlists = result.playlists.map_or_else(Vector::new, |page| page.items);
-        let shows = result.shows.map_or_else(Vector::new, |page| page.items);
-        let topic = (topics.len() == 1).then_some(topics[0]);
-
-        Ok(SearchResults {
-            query: query.into(),
-            topic,
-            artists,
-            albums,
-            tracks,
-            playlists,
-            shows,
-        })
-    }
-
-    pub fn load_spotify_link(&self, link: &SpotifyUrl) -> Result<Nav, Error> {
-        let nav = match link {
-            SpotifyUrl::Playlist(id) => Nav::PlaylistDetail(self.get_playlist(id)?.link()),
-            SpotifyUrl::Artist(id) => Nav::ArtistDetail(self.get_artist(id)?.link()),
-            SpotifyUrl::Album(id) => Nav::AlbumDetail(self.get_album(id)?.data.link(), None),
-            SpotifyUrl::Show(id) => Nav::ShowDetail(self.get_show(id)?.data.link()),
-            SpotifyUrl::Track(id) => {
-                let track = self.get_track(id)?;
-                let album = track.album.clone().ok_or_else(|| {
-                    Error::WebApiError("Track was found but has no album".to_string())
-                })?;
-                Nav::AlbumDetail(album, Some(track.id))
-            }
-        };
-        Ok(nav)
     }
 }
 
@@ -1703,5 +1637,107 @@ mod tests {
         let body = req.get_body().expect("body present");
         let expected = json!({ "uris": uris });
         assert_eq!(body, &expected);
+    }
+}
+
+// Add unit tests for playlist endpoints
+#[cfg(test)]
+mod playlist_tests {
+    use super::*;
+
+    #[test]
+    fn playlist_items_get_url() {
+        let id = "pl123";
+        let req = RequestBuilder::new(format!("v1/playlists/{id}/items"), Method::Get, None);
+        assert_eq!(req.build(), format!("https://api.spotify.com/v1/playlists/{id}/items"));
+    }
+
+    #[test]
+    fn playlist_add_items_post_builds_correct_query() {
+        let playlist_id = "plX";
+        let uri = "spotify:track:abc";
+        let req = RequestBuilder::new(format!("v1/playlists/{playlist_id}/items"), Method::Post, None)
+            .query("uris", uri);
+        assert!(req.build().contains("/v1/playlists/plX/items"));
+        assert!(req.build().contains("uris=spotify:track:abc"));
+    }
+
+    #[test]
+    fn playlist_remove_items_delete_body() {
+        let playlist_id = "plY";
+        let req = RequestBuilder::new(format!("v1/playlists/{playlist_id}/items"), Method::Delete, None)
+            .set_body(Some(json!({ "positions": [2] })));
+        assert_eq!(req.build(), format!("https://api.spotify.com/v1/playlists/{playlist_id}/items"));
+        let body = req.get_body().expect("body present");
+        assert_eq!(body, &json!({ "positions": [2] }));
+    }
+}
+
+/// Search endpoints.
+impl WebApi {
+    // https://developer.spotify.com/documentation/web-api/reference/search/
+    pub fn search(
+        &self,
+        query: &str,
+        topics: &[SearchTopic],
+        limit: usize,
+    ) -> Result<SearchResults, Error> {
+        #[derive(Deserialize)]
+        struct ApiSearchResults {
+            artists: Option<Page<Artist>>,
+            albums: Option<Page<Arc<Album>>>,
+            tracks: Option<Page<Arc<Track>>>,
+            playlists: Option<Page<Playlist>>,
+            shows: Option<Page<Arc<Show>>>,
+        }
+
+        let encoded_query = urlencoding::encode(query);
+        let type_query_param = topics.iter().map(SearchTopic::as_str).join(",");
+        // Clamp limit: default 5 when 0, maximum 10
+        let mut limit = if limit == 0 { 5 } else { limit };
+        if limit > 10 {
+            limit = 10;
+        }
+        let request = &RequestBuilder::new("v1/search", Method::Get, None)
+            .query("q", encoded_query)
+            .query("type", &type_query_param)
+            .query("limit", limit.to_string())
+            .query("marker", "from_token");
+
+        let result: ApiSearchResults = self.load(request)?;
+
+        let artists = result.artists.map_or_else(Vector::new, |page| page.items);
+        let albums = result.albums.map_or_else(Vector::new, |page| page.items);
+        let tracks = result.tracks.map_or_else(Vector::new, |page| page.items);
+        let playlists = result.playlists.map_or_else(Vector::new, |page| page.items);
+        let shows = result.shows.map_or_else(Vector::new, |page| page.items);
+        let topic = (topics.len() == 1).then_some(topics[0]);
+
+        Ok(SearchResults {
+            query: query.into(),
+            topic,
+            artists,
+            albums,
+            tracks,
+            playlists,
+            shows,
+        })
+    }
+
+    pub fn load_spotify_link(&self, link: &SpotifyUrl) -> Result<Nav, Error> {
+        let nav = match link {
+            SpotifyUrl::Playlist(id) => Nav::PlaylistDetail(self.get_playlist(id)?.link()),
+            SpotifyUrl::Artist(id) => Nav::ArtistDetail(self.get_artist(id)?.link()),
+            SpotifyUrl::Album(id) => Nav::AlbumDetail(self.get_album(id)?.data.link(), None),
+            SpotifyUrl::Show(id) => Nav::ShowDetail(self.get_show(id)?.data.link()),
+            SpotifyUrl::Track(id) => {
+                let track = self.get_track(id)?;
+                let album = track.album.clone().ok_or_else(|| {
+                    Error::WebApiError("Track was found but has no album".to_string())
+                })?;
+                Nav::AlbumDetail(album, Some(track.id))
+            }
+        };
+        Ok(nav)
     }
 }
