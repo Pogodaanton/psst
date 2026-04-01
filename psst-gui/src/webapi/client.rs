@@ -1079,13 +1079,15 @@ impl WebApi {
 
     // https://developer.spotify.com/documentation/web-api/reference/save-albums-user/
     pub fn save_album(&self, id: &str) -> Result<(), Error> {
-        let request = &RequestBuilder::new("v1/me/albums", Method::Put, None).query("ids", id);
+        let uri = format!("spotify:album:{}", id);
+        let request = &Self::build_library_request(vec![uri], Method::Put);
         self.send_empty_json(request)
     }
 
     // https://developer.spotify.com/documentation/web-api/reference/remove-albums-user/
     pub fn unsave_album(&self, id: &str) -> Result<(), Error> {
-        let request = &RequestBuilder::new("v1/me/albums", Method::Delete, None).query("ids", id);
+        let uri = format!("spotify:album:{}", id);
+        let request = &Self::build_library_request(vec![uri], Method::Delete);
         self.send_empty_json(request)
     }
 
@@ -1123,25 +1125,29 @@ impl WebApi {
 
     // https://developer.spotify.com/documentation/web-api/reference/save-tracks-user/
     pub fn save_track(&self, id: &str) -> Result<(), Error> {
-        let request = &RequestBuilder::new("v1/me/tracks", Method::Put, None).query("ids", id);
+        let uri = format!("spotify:track:{}", id);
+        let request = &Self::build_library_request(vec![uri], Method::Put);
         self.send_empty_json(request)
     }
 
     // https://developer.spotify.com/documentation/web-api/reference/remove-tracks-user/
     pub fn unsave_track(&self, id: &str) -> Result<(), Error> {
-        let request = &RequestBuilder::new("v1/me/tracks", Method::Delete, None).query("ids", id);
+        let uri = format!("spotify:track:{}", id);
+        let request = &Self::build_library_request(vec![uri], Method::Delete);
         self.send_empty_json(request)
     }
 
     // https://developer.spotify.com/documentation/web-api/reference/save-shows-user
     pub fn save_show(&self, id: &str) -> Result<(), Error> {
-        let request = &RequestBuilder::new("v1/me/shows", Method::Put, None).query("ids", id);
+        let uri = format!("spotify:show:{}", id);
+        let request = &Self::build_library_request(vec![uri], Method::Put);
         self.send_empty_json(request)
     }
 
     // https://developer.spotify.com/documentation/web-api/reference/remove-shows-user
     pub fn unsave_show(&self, id: &str) -> Result<(), Error> {
-        let request = &RequestBuilder::new("v1/me/shows", Method::Delete, None).query("ids", id);
+        let uri = format!("spotify:show:{}", id);
+        let request = &Self::build_library_request(vec![uri], Method::Delete);
         self.send_empty_json(request)
     }
 }
@@ -1251,18 +1257,16 @@ impl WebApi {
     }
 
     pub fn follow_playlist(&self, id: &str) -> Result<(), Error> {
-        let request =
-            &RequestBuilder::new(format!("v1/playlists/{id}/followers"), Method::Put, None)
-                .set_body(Some(json!({"public": false})));
-        self.request(request)?;
-        Ok(())
+        // Use the generic library endpoint with playlist URI
+        let uri = format!("spotify:playlist:{}", id);
+        let request = &Self::build_library_request(vec![uri], Method::Put);
+        self.send_empty_json(request)
     }
 
     pub fn unfollow_playlist(&self, id: &str) -> Result<(), Error> {
-        let request =
-            &RequestBuilder::new(format!("v1/playlists/{id}/followers"), Method::Delete, None);
-        self.request(request)?;
-        Ok(())
+        let uri = format!("spotify:playlist:{}", id);
+        let request = &Self::build_library_request(vec![uri], Method::Delete);
+        self.send_empty_json(request)
     }
 
     // https://developer.spotify.com/documentation/web-api/reference/get-playlist
@@ -1280,7 +1284,7 @@ impl WebApi {
         }
 
         // Spotify API likes to return _really_ bogus data for local tracks. Much better
-        // would be to ignore parsing this completely if `is_local` is true, but this
+        // would be to ignore parsing this completely if `is_local` true, but this
         // will do as well.
         #[derive(Clone, Deserialize)]
         #[serde(untagged)]
@@ -1365,6 +1369,11 @@ impl WebApi {
 
         let encoded_query = urlencoding::encode(query);
         let type_query_param = topics.iter().map(SearchTopic::as_str).join(",");
+        // Clamp limit: default 5 when 0, maximum 10
+        let mut limit = if limit == 0 { 5 } else { limit };
+        if limit > 10 {
+            limit = 10;
+        }
         let request = &RequestBuilder::new("v1/search", Method::Get, None)
             .query("q", encoded_query)
             .query("type", &type_query_param)
@@ -1450,8 +1459,7 @@ impl WebApi {
         request = add_range_param(request, data.params.duration_ms, "duration_ms");
         request = add_range_param(request, data.params.popularity, "popularity");
         request = add_range_param(request, data.params.key, "key");
-        request = add_range_param(request, data.params.mode, "mode");
-        request = add_range_param(request, data.params.tempo, "tempo");
+        request = add_range_param(request, data.params.mode, "tempo");
         request = add_range_param(request, data.params.time_signature, "time_signature");
         request = add_range_param(request, data.params.acousticness, "acousticness");
         request = add_range_param(request, data.params.danceability, "danceability");
@@ -1645,5 +1653,55 @@ impl RequestBuilder {
             );
         }
         url
+    }
+}
+
+impl WebApi {
+    // Helper to build a PUT/DELETE request for the generic /v1/me/library endpoint
+    // Accepts a list of full Spotify URIs (e.g. spotify:track:<id>)
+    fn build_library_request(uris: Vec<String>, method: Method) -> RequestBuilder {
+        let body = Some(json!({ "uris": uris }));
+        match method {
+            Method::Put => RequestBuilder::new("v1/me/library", Method::Put, body),
+            Method::Delete => RequestBuilder::new("v1/me/library", Method::Delete, body),
+            _ => RequestBuilder::new("v1/me/library", method, body),
+        }
+    }
+}
+
+// Add unit tests for the new library request builder and usage
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_put_me_library_request_contains_uris() {
+        let uris = vec!["spotify:track:abc".to_string(), "spotify:album:xyz".to_string()];
+        let req = WebApi::build_library_request(uris.clone(), Method::Put);
+        // URL build should point to the generic endpoint
+        assert_eq!(req.build(), "https://api.spotify.com/v1/me/library");
+        // Method should be Put
+        match req.get_method() {
+            Method::Put => {}
+            _ => panic!("expected Method::Put"),
+        }
+        // Body should contain the URIs array
+        let body = req.get_body().expect("body present");
+        let expected = json!({ "uris": uris });
+        assert_eq!(body, &expected);
+    }
+
+    #[test]
+    fn build_delete_me_library_request_contains_uri() {
+        let uris = vec!["spotify:playlist:pl1".to_string()];
+        let req = WebApi::build_library_request(uris.clone(), Method::Delete);
+        assert_eq!(req.build(), "https://api.spotify.com/v1/me/library");
+        match req.get_method() {
+            Method::Delete => {}
+            _ => panic!("expected Method::Delete"),
+        }
+        let body = req.get_body().expect("body present");
+        let expected = json!({ "uris": uris });
+        assert_eq!(body, &expected);
     }
 }
