@@ -64,14 +64,6 @@ fn info_widget() -> impl Widget<WithCtx<Arc<Show>>> {
     .lens(Ctx::data());
 
     let stats = Flex::column()
-        .with_child(stat_row("Publisher:", |info: &Arc<Show>| {
-            if info.publisher.is_empty() {
-                String::new()
-            } else {
-                info.publisher.to_string()
-            }
-        }))
-        .with_default_spacer()
         .with_child(stat_row("Episodes:", |info: &Arc<Show>| {
             match info.total_episodes {
                 Some(count) => format!("{} episode{}", count, if count == 1 { "" } else { "s" }),
@@ -129,18 +121,6 @@ pub fn show_widget(horizontal: bool) -> impl Widget<WithCtx<Arc<Show>>> {
         .lens(Show::name.in_arc())
         .align_left();
 
-    let show_publisher = Label::<Arc<Show>>::dynamic(|show, _| {
-        if !show.publisher.is_empty() {
-            show.publisher.to_string()
-        } else {
-            String::new()
-        }
-    })
-    .with_line_break_mode(LineBreaking::Clip)
-    .with_text_size(theme::TEXT_SIZE_SMALL)
-    .with_text_color(theme::PLACEHOLDER_COLOR)
-    .align_left();
-
     let show_episodes = Label::<Arc<Show>>::dynamic(|show, _| match show.total_episodes {
         Some(count) => format!("{} episode{}", count, if count == 1 { "" } else { "s" }),
         None => String::new(),
@@ -157,7 +137,6 @@ pub fn show_widget(horizontal: bool) -> impl Widget<WithCtx<Arc<Show>>> {
             .with_child(
                 Flex::column()
                     .with_child(show_name)
-                    .with_child(show_publisher)
                     .with_child(show_episodes)
                     .align_horizontal(UnitPoint::CENTER)
                     .align_vertical(UnitPoint::TOP)
@@ -172,7 +151,6 @@ pub fn show_widget(horizontal: bool) -> impl Widget<WithCtx<Arc<Show>>> {
             .with_flex_child(
                 Flex::column()
                     .with_child(show_name)
-                    .with_child(show_publisher)
                     .with_child(show_episodes),
                 1.0,
             )

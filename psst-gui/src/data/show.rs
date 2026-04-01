@@ -20,7 +20,7 @@ pub struct Show {
     pub id: Arc<str>,
     pub name: Arc<str>,
     pub images: Vector<Image>,
-    pub publisher: Arc<str>,
+    #[serde(deserialize_with = "super::utils::deserialize_null_arc_str")]
     pub description: Arc<str>,
     pub total_episodes: Option<usize>,
 }

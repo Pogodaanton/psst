@@ -408,7 +408,6 @@ impl WebApi {
 
             // Show-specific fields
             cover_art: Option<CoverArt>,
-            publisher: Option<Publisher>,
             total_episodes: Option<usize>,
         }
 
@@ -460,10 +459,6 @@ impl WebApi {
             Mixed,
         }
 
-        #[derive(Deserialize)]
-        pub struct Publisher {
-            name: String,
-        }
 
         #[derive(Deserialize)]
         pub enum DataTypename {
@@ -669,14 +664,6 @@ impl WebApi {
                                         })
                                         .collect()
                                 },
-                            ),
-                            publisher: Arc::from(
-                                item.content
-                                    .data
-                                    .publisher
-                                    .as_ref()
-                                    .map(|p| p.name.as_str())
-                                    .unwrap_or(""),
                             ),
                             description: Arc::from(
                                 item.content.data.description.as_deref().unwrap_or(""),
@@ -1779,8 +1766,8 @@ impl WebApi {
             artists: Option<Page<Artist>>,
             albums: Option<Page<Arc<Album>>>,
             tracks: Option<Page<Arc<Track>>>,
-            playlists: Option<Page<Playlist>>,
-            shows: Option<Page<Arc<Show>>>,
+            playlists: Option<Page<Option<Playlist>>>,
+            shows: Option<Page<Option<Show>>>,
         }
 
         let encoded_query = urlencoding::encode(query);
@@ -1801,8 +1788,29 @@ impl WebApi {
         let artists = result.artists.map_or_else(Vector::new, |page| page.items);
         let albums = result.albums.map_or_else(Vector::new, |page| page.items);
         let tracks = result.tracks.map_or_else(Vector::new, |page| page.items);
-        let playlists = result.playlists.map_or_else(Vector::new, |page| page.items);
-        let shows = result.shows.map_or_else(Vector::new, |page| page.items);
+
+        // Parse playlists: items may be null (None) or full `Playlist` objects.
+        let playlists = if let Some(page) = result.playlists {
+            page
+                .items
+                .into_iter()
+                .filter_map(|opt_item| opt_item.map(|p| p))
+                .collect()
+        } else {
+            Vector::new()
+        };
+
+        // Parse shows: items may be null or full `Show` objects.
+        let shows = if let Some(page) = result.shows {
+            page
+                .items
+                .into_iter()
+                .filter_map(|opt_item| opt_item.map(|s| Arc::new(s)))
+                .collect()
+        } else {
+            Vector::new()
+        };
+
         let topic = (topics.len() == 1).then_some(topics[0]);
 
         Ok(SearchResults {
