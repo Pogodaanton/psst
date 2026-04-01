@@ -1257,16 +1257,16 @@ impl WebApi {
     }
 
     pub fn follow_playlist(&self, id: &str) -> Result<(), Error> {
-        // Use the generic library endpoint with playlist URI
-        let uri = format!("spotify:playlist:{}", id);
-        let request = &Self::build_library_request(vec![uri], Method::Put);
-        self.send_empty_json(request)
+        // Use the standard followers endpoint for following playlists
+        let request = &RequestBuilder::new(format!("v1/playlists/{id}/followers"), Method::Put, Some(json!({ "public": false })));
+        self.request(request)?;
+        Ok(())
     }
 
     pub fn unfollow_playlist(&self, id: &str) -> Result<(), Error> {
-        let uri = format!("spotify:playlist:{}", id);
-        let request = &Self::build_library_request(vec![uri], Method::Delete);
-        self.send_empty_json(request)
+        let request = &RequestBuilder::new(format!("v1/playlists/{id}/followers"), Method::Delete, None);
+        self.request(request)?;
+        Ok(())
     }
 
     // https://developer.spotify.com/documentation/web-api/reference/get-playlist
@@ -1278,14 +1278,28 @@ impl WebApi {
 
     // https://developer.spotify.com/documentation/web-api/reference/get-playlists-items
     pub fn get_playlist_tracks(&self, id: &str) -> Result<Vector<Arc<Track>>, Error> {
+        // Spotify historically returned playlist items with a `track` field. The
+        // migration renamed this to `item` and nested the track inside that.
+        // Support both shapes to remain compatible with different app modes / API versions.
         #[derive(Clone, Deserialize)]
-        struct PlaylistItem {
+        struct PlaylistItemTrack {
             track: OptionalTrack,
         }
 
-        // Spotify API likes to return _really_ bogus data for local tracks. Much better
-        // would be to ignore parsing this completely if `is_local` true, but this
-        // will do as well.
+        #[derive(Clone, Deserialize)]
+        struct PlaylistItemItem {
+            item: OptionalTrack,
+        }
+
+        #[derive(Clone, Deserialize)]
+        #[serde(untagged)]
+        enum PlaylistItem {
+            Track(PlaylistItemTrack),
+            Item(PlaylistItemItem),
+        }
+
+        // Spotify API likes to return _really_ bogus data for local tracks. Keep the
+        // same resilient parsing: accept either a Track or an arbitrary JSON blob.
         #[derive(Clone, Deserialize)]
         #[serde(untagged)]
         enum OptionalTrack {
@@ -1293,63 +1307,141 @@ impl WebApi {
             Json(serde_json::Value),
         }
 
-        // Use the renamed `items` endpoint
+        // Use the `items` endpoint (replacement for the older `tracks` path).
         let request = &RequestBuilder::new(format!("v1/playlists/{id}/items"), Method::Get, None)
-            .query("marker", "from_token")
+            .query("market", "from_token")
             .query("additional_types", "track");
 
         let result: Vector<PlaylistItem> = self.load_all_pages(request)?;
 
         let local_track_manager = self.local_track_manager.lock();
 
-        Ok(result
+        // If the new `/items` endpoint returns results, use them.
+        let mut tracks: Vector<Arc<Track>> = result
             .into_iter()
             .enumerate()
             .filter_map(|(index, item)| {
-                let mut track = match item.track {
+                let optional_track = match item {
+                    PlaylistItem::Track(t) => t.track,
+                    PlaylistItem::Item(i) => i.item,
+                };
+
+                let mut track = match optional_track {
                     OptionalTrack::Track(track) => track,
                     OptionalTrack::Json(json) => local_track_manager.find_local_track(json)?,
                 };
+
                 Arc::make_mut(&mut track).track_pos = index;
                 Some(track)
             })
-            .collect())
+            .collect();
+
+        // Fallback: If there were no items from the `/items` endpoint, try to fetch
+        // the playlist JSON itself and extract items from known locations. This
+        // helps handle API variants that return items nested inside the playlist
+        // response (fields renamed during migration).
+        if tracks.is_empty() {
+            let req = &RequestBuilder::new(format!("v1/playlists/{id}"), Method::Get, None)
+                .query("market", "from_token");
+            let playlist_json: serde_json::Value = match self.load(req) {
+                Ok(v) => v,
+                Err(_) => return Ok(tracks),
+            };
+
+            // Helper: collect candidate item arrays from known paths
+            let candidates = [
+                playlist_json.get("items"),                  // may be array
+                playlist_json.get("tracks").and_then(|t| t.get("items")), // tracks.items
+                playlist_json.get("items").and_then(|i| i.get("items")), // items.items
+                playlist_json.get("tracks").and_then(|t| t.get("tracks")),
+            ];
+
+            let mut extracted: Vec<serde_json::Value> = Vec::new();
+            for cand in candidates.iter().flatten() {
+                if cand.is_array() {
+                    if let Some(arr) = cand.as_array() {
+                        extracted.extend(arr.clone());
+                    }
+                }
+            }
+
+            // Another fallback: if playlist_json contains `tracks` and it's an array-like wrapper
+            if extracted.is_empty() {
+                if let Some(arr) = playlist_json.get("tracks").and_then(|t| t.get("tracks")).and_then(|v| v.as_array()) {
+                    extracted.extend(arr.clone());
+                }
+            }
+
+            // Process extracted items similar to above
+            for (index, elem) in extracted.into_iter().enumerate() {
+                // Try several shapes to locate the track object:
+                // 1) elem.track
+                // 2) elem.item (which may itself be a track or contain 'track')
+                // 3) elem.item.track
+                let track_json_opt = if elem.get("track").is_some() {
+                    Some(elem.get("track").unwrap().clone())
+                } else if elem.get("item").is_some() {
+                    let it = elem.get("item").unwrap();
+                    if it.get("track").is_some() {
+                        Some(it.get("track").unwrap().clone())
+                    } else {
+                        Some(it.clone())
+                    }
+                } else {
+                    None
+                };
+
+                if let Some(track_json) = track_json_opt {
+                    // Try to deserialize into Track; if that fails, treat as local JSON
+                    let opt_track: OptionalTrack = match serde_json::from_value(track_json.clone()) {
+                        Ok(t) => OptionalTrack::Track(t),
+                        Err(_) => OptionalTrack::Json(track_json.clone()),
+                    };
+
+                    let mut track = match opt_track {
+                        OptionalTrack::Track(track) => track,
+                        OptionalTrack::Json(json) => match local_track_manager.find_local_track(json) {
+                            Some(t) => t,
+                            None => continue,
+                        },
+                    };
+
+                    Arc::make_mut(&mut track).track_pos = index;
+                    tracks.push_back(track);
+                }
+            }
+        }
+
+        Ok(tracks)
     }
 
-    pub fn change_playlist_details(&self, id: &str, name: &str) -> Result<(), Error> {
-        // Use the correct endpoint and method for changing playlist details
-        let request = &RequestBuilder::new(format!("v1/playlists/{id}"), Method::Put, Some(json!({ "name": name })));
+    /// Add a track to a playlist using the new `/items` endpoint (query param `uris`).
+    pub fn add_track_to_playlist(&self, id: &str, uri: &str) -> Result<(), Error> {
+        let request = &RequestBuilder::new(format!("v1/playlists/{id}/items"), Method::Post, None)
+            .query("uris", uri);
+        // The API returns a snapshot id; we don't need it here so just issue the request.
         self.request(request)?;
         Ok(())
     }
 
-    // https://developer.spotify.com/documentation/web-api/reference/add-items-to-playlist
-    pub fn add_track_to_playlist(&self, playlist_id: &str, track_uri: &str) -> Result<(), Error> {
-        // POST /v1/playlists/{id}/items?uris=spotify:track:... is still supported shape
-        let request = &RequestBuilder::new(
-            format!("v1/playlists/{playlist_id}/items"),
-            Method::Post,
-            None,
-        )
-        .query("uris", track_uri);
-        self.request(request).map(|_| ())
+    /// Remove a track from a playlist by position using the `/items` endpoint with a
+    /// DELETE request and a JSON body containing `positions`.
+    pub fn remove_track_from_playlist(&self, id: &str, position: usize) -> Result<(), Error> {
+        let body = json!({ "positions": [position] });
+        let request = &RequestBuilder::new(format!("v1/playlists/{id}/items"), Method::Delete, Some(body));
+        self.request(request)?;
+        Ok(())
     }
 
-    // https://developer.spotify.com/documentation/web-api/reference/remove-items-playlist
-    pub fn remove_track_from_playlist(
-        &self,
-        playlist_id: &str,
-        track_pos: usize,
-    ) -> Result<(), Error> {
-        // use items endpoint; keep using positions body
-        let request = &RequestBuilder::new(
-            format!("v1/playlists/{playlist_id}/items"),
-            Method::Delete,
-            None,
-        )
-        .set_body(Some(json!({ "positions": [track_pos] })));
-        self.request(request).map(|_| ())
+    /// Change playlist details (e.g., name). Uses PUT on `/v1/playlists/{id}` per
+    /// the Web API.
+    pub fn change_playlist_details(&self, id: &str, name: &str) -> Result<(), Error> {
+        let body = json!({ "name": name });
+        let request = &RequestBuilder::new(format!("v1/playlists/{id}"), Method::Put, Some(body));
+        self.send_empty_json(request)
     }
+
+
 }
 
 /// Recommendation endpoints.
@@ -1392,7 +1484,7 @@ impl WebApi {
 
         request = add_range_param(request, data.params.duration_ms, "duration_ms");
         request = add_range_param(request, data.params.popularity, "popularity");
-        request = add_range_param(request, data.params.key, "key");
+        request = add_range_param(request, data.params.key, "tempo");
         request = add_range_param(request, data.params.mode, "tempo");
         request = add_range_param(request, data.params.time_signature, "time_signature");
         request = add_range_param(request, data.params.acousticness, "acousticness");
